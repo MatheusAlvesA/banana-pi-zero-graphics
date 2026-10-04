@@ -1,6 +1,6 @@
 # Banana Pi M2 Zero com gráficos mínimos
 
-O objetivo deste repositório é servir como uma segunda etapa do projeto [Banana Pi M2 Zero do Zero](https://github.com/MatheusAlvesA/banana-pi-m2-zero-kernel). Conclua aquele projeto antes de começar este para entender como a base do sistema foi construída.
+O objetivo deste repositório é servir como uma segunda etapa do projeto [Banana Pi M2 Zero do Kernel](https://github.com/MatheusAlvesA/banana-pi-m2-zero-kernel). Conclua aquele projeto antes de começar este para entender como a base do sistema foi construída.
 
 Neste projeto, vamos substituir o programa `start.c` da etapa anterior por uma nova versão, capaz de mostrar gráficos simples na tela e vinculada dinamicamente às bibliotecas necessárias.
 
