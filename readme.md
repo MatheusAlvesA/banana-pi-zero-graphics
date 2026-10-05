@@ -4,6 +4,13 @@ O objetivo deste repositório é servir como uma segunda etapa do projeto [Banan
 
 Neste projeto, vamos substituir o programa `start.c` da etapa anterior por uma nova versão, capaz de mostrar gráficos simples na tela e vinculada dinamicamente às bibliotecas necessárias.
 
+O repositório traz duas versões desse programa:
+
+- `bin/start.c`: desenha diretamente com DRM/KMS, usando apenas `libc` e `libdrm`.
+- `bin/start_gl.c`: desenha com a GPU usando OpenGL ES 2.0 por meio da [Mesa3D](https://mesa3d.org/). Veja a seção [Versão com OpenGL ES (Mesa3D)](#versão-com-opengl-es-mesa3d).
+
+Apenas uma delas é usada por vez, sempre instalada no cartão SD como `/bin/start`.
+
 ## Dependências
 
 O programa `start` depende das bibliotecas compartilhadas `libc` e `libdrm`, que precisam estar disponíveis no cartão SD do Banana Pi. Como o sistema do projeto anterior foi construído do zero, também é necessário incluir o carregador dinâmico `ld-linux-armhf.so.3`.
@@ -87,3 +94,143 @@ ln -sfn host/arm-buildroot-linux-gnueabihf/sysroot "$BUILDROOT_DIR/output/stagin
 ```
 
 Se a toolchain tiver outro prefixo, ajuste também o nome do diretório dentro de `host/`.
+
+## Versão com OpenGL ES (Mesa3D)
+
+O arquivo `bin/start_gl.c` é uma alternativa ao `bin/start.c`. Em vez de preencher um buffer de pixels pela CPU, ele usa a GPU da placa para desenhar com OpenGL ES 2.0, por meio da Mesa3D.
+
+### Como a pilha gráfica funciona
+
+O Allwinner H2+ da Banana Pi M2 Zero tem uma GPU Mali-400 MP2. No Linux, ela é atendida pelo driver `lima` do kernel e pelo driver `lima` da Mesa. A saída de vídeo e a GPU são dispositivos DRM separados:
+
+| Dispositivo | Driver | Função |
+|---|---|---|
+| `/dev/dri/card0` | `sun4i-drm` | Saída de vídeo (modeset, HDMI) |
+| `/dev/dri/card1` | `lima` | GPU, sem conectores |
+| `/dev/dri/renderD128` | `lima` | Renderização |
+
+A numeração dos nodes `card*` pode variar entre inicializações. Por isso os programas procuram o dispositivo que tem um conector conectado, em vez de usar um número fixo.
+
+A Mesa liga os dois dispositivos com o driver `kmsro` ("render-only"): o programa abre o node do `sun4i-drm`, e a Mesa usa a GPU do `lima` para renderizar em buffers que podem ser exibidos na tela. Como o sistema não tem X11 nem Wayland, a janela é criada com GBM e EGL diretamente sobre o DRM/KMS.
+
+A Mali-400 suporta OpenGL ES 2.0. Não há suporte a OpenGL ES 3.x, e o OpenGL desktop exposto pela Mesa nessa GPU é incompleto. Por isso o programa usa OpenGL ES 2.0.
+
+### Kernel
+
+O kernel em `boot/zImage` já inclui os drivers necessários: `sun4i-drm`, `sun8i-mixer`, `sun8i-dw-hdmi` e `lima`. Se compilar o seu próprio kernel no projeto anterior, confirme que `CONFIG_DRM_SUN4I`, `CONFIG_DRM_SUN8I_MIXER`, `CONFIG_DRM_SUN8I_DW_HDMI` e `CONFIG_DRM_LIMA` estão habilitados. O `sunxi_defconfig` já inclui esses drivers.
+
+Os buffers exibidos na tela precisam de memória fisicamente contígua, reservada pelo parâmetro `cma=128M` que o `boot/boot.cmd` passa ao kernel. A correção de `mali-supply` no mesmo script permite que o `lima` controle a frequência da GPU.
+
+### Configuração do Buildroot
+
+A Mesa e suas dependências são compiladas com o Buildroot 2026.08, que inclui a Mesa 26.1.8. Baixe o Buildroot, descompacte-o na pasta `buildroot/` dentro deste projeto, que é ignorada pelo git, e execute `make menuconfig` dentro dela.
+
+Partindo da configuração padrão, ajuste as opções abaixo. Os nomes entre parênteses são os símbolos gravados no arquivo `.config`.
+
+**Target options**
+
+- Target Architecture: `ARM (little endian)` (`BR2_arm`)
+- Target Architecture Variant: `cortex-A7` (`BR2_cortex_a7`)
+- Target ABI: `EABIhf` (`BR2_ARM_EABIHF`)
+- Floating point strategy: `VFPv4-D16` (`BR2_ARM_FPU_VFPV4D16`)
+
+**Toolchain**
+
+- C library: `glibc` (`BR2_TOOLCHAIN_BUILDROOT_GLIBC`)
+- Kernel Headers: `Linux 7.1.x kernel headers` (`BR2_KERNEL_HEADERS_7_1`)
+- GCC compiler Version: `gcc 15.x` (`BR2_GCC_VERSION_15_X`)
+- `Enable C++ support` (`BR2_TOOLCHAIN_BUILDROOT_CXX`). A Mesa exige C++. Habilite antes da primeira compilação, pois mudar essa opção depois obriga a recompilar toda a toolchain.
+
+**Target packages → Graphic libraries and applications (graphic/text)**
+
+- Em *Graphic libraries*, habilite `mesa3d` (`BR2_PACKAGE_MESA3D`) e, dentro dele:
+  - `Gallium lima driver` (`BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_LIMA`)
+  - `gbm` (`BR2_PACKAGE_MESA3D_GBM`)
+  - `OpenGL EGL` (`BR2_PACKAGE_MESA3D_OPENGL_EGL`)
+  - `OpenGL ES` (`BR2_PACKAGE_MESA3D_OPENGL_ES`)
+- Em *Graphic applications*, habilite `kmscube` (`BR2_PACKAGE_KMSCUBE`), usado para testar a pilha gráfica.
+
+Não habilite nenhum outro driver da Mesa, nem LLVM, X.org ou `libglvnd`. Sem `libglvnd`, as bibliotecas `libEGL` e `libGLESv2` são as da própria Mesa e não dependem de arquivos de configuração em `/usr/share`. O pacote `libdrm` é selecionado automaticamente pela Mesa.
+
+As demais opções podem ficar no padrão do Buildroot, incluindo as de proteção (`-fstack-protector-strong`, PIE, RELRO e `_FORTIFY_SOURCE`).
+
+Salve a configuração e compile:
+
+```sh
+make
+```
+
+A primeira compilação leva bastante tempo, pois inclui a toolchain com C++ e a Mesa.
+
+A glibc é configurada para a versão dos cabeçalhos do kernel escolhida, e os programas gerados exigem um kernel 7.1 ou mais recente. O kernel em `boot/zImage` é o 7.2.
+
+### Conferindo o resultado
+
+Ao final, confira se as bibliotecas da Mesa foram geradas:
+
+```sh
+ls -l output/target/usr/lib/ output/target/usr/lib/gbm/
+```
+
+As bibliotecas principais ficam em `output/target/usr/lib/`: `libEGL`, `libGLESv2`, `libgbm`, `libgallium-26.1.8.so` e `libdrm`, além de dependências como `libstdc++`, `libexpat` e `libz`. A pasta `output/target/usr/lib/gbm/` deve conter `dri_gbm.so`, o backend que a `libgbm` carrega em tempo de execução.
+
+Na Mesa 26 não existe mais a pasta `usr/lib/dri/` com um arquivo por driver. Os drivers `lima` e `kmsro` ficam dentro da `libgallium-26.1.8.so`, usada diretamente pela `libEGL`, pela `libGLESv2` e pelo `dri_gbm.so`. O `kmsro` não tem uma opção própria no Buildroot: ele é compilado junto com o driver `lima` e usado automaticamente para dispositivos de exibição sem driver de GPU próprio, como o `sun4i-drm`.
+
+### Cópia para o cartão SD
+
+Com a Mesa, a lista de bibliotecas é longa, e parte delas, como o backend `/usr/lib/gbm/dri_gbm.so`, é carregada em tempo de execução por `dlopen`, sem aparecer nas dependências dos executáveis. Por isso, copie as pastas de bibliotecas inteiras, em vez de arquivos individuais. Na pasta do Buildroot, com a partição raiz do cartão montada em `/media/usuario/main`:
+
+```sh
+sudo mkdir -p /media/usuario/main/usr/lib /media/usuario/main/usr/bin
+sudo cp -a output/target/lib/.     /media/usuario/main/lib/
+sudo cp -a output/target/usr/lib/. /media/usuario/main/usr/lib/
+sudo cp -a output/target/usr/bin/kmscube /media/usuario/main/usr/bin/
+```
+
+Ajuste o ponto de montagem para o da sua máquina. O `cp -a` preserva os links simbólicos. Essas bibliotecas substituem as da pasta `lib/` deste repositório: a `libc`, o carregador dinâmico e a `libdrm` precisam vir da mesma compilação que a Mesa.
+
+Não extraia no cartão a imagem `output/images/rootfs.tar`. A configuração padrão do Buildroot instala o init do BusyBox em `/sbin/init`, e ele substituiria o `sbin/init` deste projeto.
+
+O carregador dinâmico procura bibliotecas em `/lib` e `/usr/lib` por padrão, então não é necessário criar `/etc/ld.so.cache`. A `libgbm` procura seu backend em `/usr/lib/gbm`.
+
+### Testando com o kmscube
+
+Antes de usar o `start_gl`, valide a pilha gráfica com o `kmscube`, que desenha um cubo girando usando GBM, EGL e OpenGL ES 2.0. Como o `init` executa `/bin/start`, crie temporariamente um link para ele no cartão:
+
+```sh
+sudo ln -sf /usr/bin/kmscube /media/usuario/main/bin/start
+```
+
+Se o cubo aparecer no HDMI, o kernel, a Mesa e o driver `lima` estão funcionando. Para voltar a usar o seu programa, remova o link e copie novamente o executável para `/bin/start`.
+
+### Compilação de `start_gl.c`
+
+O `start_gl.c` precisa dos cabeçalhos e das bibliotecas da Mesa gerados pelo Buildroot, então use a toolchain do Buildroot, como na Opção 2 acima. O compilador cruzado do Ubuntu não serve aqui, pois os cabeçalhos da Mesa do sistema não correspondem às bibliotecas do cartão.
+
+Execute na raiz deste repositório:
+
+```sh
+BUILDROOT_DIR="$PWD/buildroot"
+BUILDROOT_CC="$BUILDROOT_DIR/output/host/bin/arm-buildroot-linux-gnueabihf-gcc"
+BUILDROOT_SYSROOT="$BUILDROOT_DIR/output/staging"
+
+"$BUILDROOT_CC" \
+    --sysroot="$BUILDROOT_SYSROOT" \
+    -Wall -Wextra -O2 -mcpu=cortex-a7 \
+    -I"$BUILDROOT_SYSROOT/usr/include/libdrm" \
+    bin/start_gl.c \
+    -lEGL -lGLESv2 -lgbm -ldrm \
+    -o bin/start_gl
+```
+
+Copie `bin/start_gl` para `/bin/start` no cartão SD, pois é esse o caminho executado pelo `init`:
+
+```sh
+sudo cp bin/start_gl /media/usuario/main/bin/start
+```
+
+### Observações de execução
+
+- O kernel inicia o `init` com `HOME=/`, e a Mesa grava o cache de shaders em `/.cache`, no cartão SD. Para desativar o cache, defina `MESA_SHADER_CACHE_DISABLE=true` no ambiente do programa.
+- Para diagnosticar falhas na inicialização do EGL ou no carregamento dos drivers, defina `EGL_LOG_LEVEL=debug`.
+- O sistema não tem udev. A Mesa e a `libdrm` encontram os dispositivos por `/dev` e `/sys`, que o `init` já monta.
