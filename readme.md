@@ -35,6 +35,48 @@ Os arquivos necessários estarão nos seguintes caminhos, relativos à pasta do 
 
 O número da versão de `libdrm` pode variar conforme a versão do Buildroot e a configuração utilizada. Copie as bibliotecas e o carregador para `/lib` no cartão SD, incluindo os arquivos apontados por eventuais links simbólicos e preservando esses links. Assim, o sistema terá a biblioteca C (`libc`) e a biblioteca de acesso à interface gráfica DRM/KMS do kernel (`libdrm`).
 
+## Device tree
+
+O U-Boot carrega o device tree da placa, `boot/dtb/sun8i-h2-plus-bananapi-m2-zero.dtb`, e aplica sobre ele o overlay `boot/dtb/overlay/bananapi-m2-zero-graphics.dtbo` antes de iniciar o kernel. O overlay reúne todos os ajustes que este projeto faz no device tree:
+
+- `capacity-dmips-mhz` igual nos quatro núcleos Cortex-A7.
+- Alimentação da GPU (`mali-supply`) e tensão de 1,2 V em todos os pontos de operação da GPU, para que o `lima` controle a frequência.
+- I2S2 habilitada e placa de som `simple-audio-card` para o áudio pelo HDMI (veja [Áudio pelo HDMI](#áudio-pelo-hdmi)).
+
+Copie o `.dtbo` para `dtb/overlay/` na partição de boot do cartão SD, ao lado da pasta `dtb/` que já contém o `.dtb`.
+
+O overlay referencia os nós do device tree pelos labels do código-fonte do kernel (`&mali`, `&hdmi`, `&i2s2` etc.). Para isso, o `.dtb` precisa ter sido compilado com símbolos, ou seja, conter o nó `__symbols__`. O `.dtb` deste repositório já foi compilado assim. Se gerar o seu próprio no projeto anterior, passe `DTC_FLAGS=-@` ao `make`, na pasta do código-fonte do kernel:
+
+```sh
+make ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- DTC_FLAGS=-@ \
+    allwinner/sun8i-h2-plus-bananapi-m2-zero.dtb
+```
+
+O arquivo gerado fica em `arch/arm/boot/dts/allwinner/`. Sem os símbolos, o U-Boot não consegue aplicar o overlay, mostra `ERRO: falha ao aplicar o overlay` e interrompe o boot.
+
+Depois de alterar o overlay, compile-o novamente com o `dtc` (pacote `device-tree-compiler`):
+
+```sh
+dtc -@ -I dts -O dtb \
+    -o boot/dtb/overlay/bananapi-m2-zero-graphics.dtbo \
+    boot/dtb/overlay/bananapi-m2-zero-graphics.dts
+```
+
+Para conferir o resultado sem a placa, aplique o overlay no computador com o `fdtoverlay`, do mesmo pacote. Se o comando terminar sem erro, o U-Boot também conseguirá aplicá-lo:
+
+```sh
+fdtoverlay -i boot/dtb/sun8i-h2-plus-bananapi-m2-zero.dtb \
+    -o /tmp/resultado.dtb boot/dtb/overlay/bananapi-m2-zero-graphics.dtbo
+```
+
+Se alterar o `boot/boot.cmd`, gere novamente o `boot/boot.scr`, que é a versão lida pelo U-Boot, e copie-o para o cartão SD:
+
+```sh
+mkimage -C none -A arm -T script -d boot/boot.cmd boot/boot.scr
+```
+
+O `mkimage` faz parte do pacote `u-boot-tools`.
+
 ## Compilação de `start.c`
 
 O arquivo `bin/start.c` implementa um programa simples que executa as seguintes etapas:
@@ -122,7 +164,7 @@ A Mali-400 suporta OpenGL ES 2.0. Não há suporte a OpenGL ES 3.x, e o OpenGL d
 
 O kernel em `boot/zImage` já inclui os drivers necessários: `sun4i-drm`, `sun8i-mixer`, `sun8i-dw-hdmi` e `lima`. Se compilar o seu próprio kernel no projeto anterior, confirme que `CONFIG_DRM_SUN4I`, `CONFIG_DRM_SUN8I_MIXER`, `CONFIG_DRM_SUN8I_DW_HDMI` e `CONFIG_DRM_LIMA` estão habilitados. O `sunxi_defconfig` já inclui esses drivers.
 
-Os buffers exibidos na tela precisam de memória fisicamente contígua, reservada pelo parâmetro `cma=128M` que o `boot/boot.cmd` passa ao kernel. A correção de `mali-supply` no mesmo script permite que o `lima` controle a frequência da GPU.
+Os buffers exibidos na tela precisam de memória fisicamente contígua, reservada pelo parâmetro `cma=128M` que o `boot/boot.cmd` passa ao kernel. A correção de `mali-supply` no overlay do device tree (veja [Device tree](#device-tree)) permite que o `lima` controle a frequência da GPU.
 
 ### Configuração do Buildroot
 
@@ -369,21 +411,13 @@ O H3 envia o áudio ao HDMI por uma interface I2S interna, a I2S2. O controlador
 
 ### Device tree
 
-No device tree em `boot/dtb/`, a I2S2 está desabilitada, o nó do HDMI não declara uma interface de áudio e não existe nenhuma placa de som. Em vez de alterar o arquivo `.dtb`, o `boot/boot.cmd` corrige o device tree no U-Boot antes de iniciar o kernel, como já faz com a GPU:
+No device tree original, a I2S2 está desabilitada e não existe nenhuma placa de som. O overlay `boot/dtb/overlay/bananapi-m2-zero-graphics.dts` (veja [Device tree](#device-tree)) faz os ajustes necessários:
 
-1. Habilita a I2S2 (`/soc/i2s@1c22800`).
-2. Adiciona `#sound-dai-cells` ao nó do HDMI, para que ele possa ser referenciado como interface de áudio.
+1. Habilita a I2S2 (`&i2s2`).
+2. Garante `#sound-dai-cells` no nó do HDMI (`&hdmi`), para que ele possa ser referenciado como interface de áudio.
 3. Cria o nó `/hdmi-sound`, uma `simple-audio-card` que liga a I2S2 ao HDMI. O codec do HDMI exige o sinal de quadro (LRCK) invertido e slots fixos de 32 bits, configurados por `simple-audio-card,frame-inversion` e pelas propriedades de TDM. A propriedade `playback-only` limita a placa à reprodução: a I2S2 só tem DMA de envio, e sem essa propriedade a placa também tentaria criar o fluxo de captura, falhando com `Missing dma channel for stream: 1`.
 
-Os nós do HDMI e da I2S2 não têm `phandle` no device tree original, pois nenhum outro nó os referencia. O script reaproveita o `phandle` se ele existir e, caso contrário, atribui os valores livres `0x1000` e `0x1001`. A configuração segue a [proposta de áudio HDMI para H3/H5](https://www.mail-archive.com/linux-kernel@vger.kernel.org/msg2322809.html) enviada ao kernel, que não chegou a ser incorporada.
-
-Depois de alterar o `boot/boot.cmd`, gere novamente o `boot/boot.scr`, que é a versão lida pelo U-Boot, e copie-o para o cartão SD:
-
-```sh
-mkimage -C none -A arm -T script -d boot/boot.cmd boot/boot.scr
-```
-
-O `mkimage` faz parte do pacote `u-boot-tools`.
+Os nós do HDMI e da I2S2 são referenciados pelos labels `&hdmi` e `&i2s2`, e o U-Boot cria os `phandle` necessários ao aplicar o overlay. A configuração segue a [proposta de áudio HDMI para H3/H5](https://www.mail-archive.com/linux-kernel@vger.kernel.org/msg2322809.html) enviada ao kernel, que não chegou a ser incorporada.
 
 ### Kernel
 
