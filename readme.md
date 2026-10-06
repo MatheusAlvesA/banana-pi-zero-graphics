@@ -238,7 +238,7 @@ sudo cp bin/start_gl /media/usuario/main/bin/start
 
 ## Versão com SDL2
 
-O arquivo `bin/start_sdl.c` faz o mesmo que o `bin/start_gl.c`: pinta a tela de vermelho com a GPU por 10 segundos. Além disso, se a barra de espaço for pressionada num teclado conectado, a tela fica verde, o que serve para testar a entrada pelo udev. A diferença é que a [SDL2](https://www.libsdl.org/) assume as etapas que o `start_gl.c` faz manualmente: procurar o dispositivo DRM, assumir o controle como DRM master, criar a GBM e o EGL, e exibir cada quadro na tela.
+O arquivo `bin/start_sdl.c` faz o mesmo que o `bin/start_gl.c`: pinta a tela de vermelho com a GPU por 10 segundos. Além disso, se a barra de espaço for pressionada num teclado conectado, a tela fica verde, o que serve para testar a entrada pelo udev. Se houver uma placa de som, o programa também toca um tom de 440 Hz (a nota lá) durante os 10 segundos, o que serve para testar o [áudio pelo HDMI](#áudio-pelo-hdmi). A diferença é que a [SDL2](https://www.libsdl.org/) assume as etapas que o `start_gl.c` faz manualmente: procurar o dispositivo DRM, assumir o controle como DRM master, criar a GBM e o EGL, e exibir cada quadro na tela.
 
 A SDL2 é a camada usada por muitos jogos e engines para acessar vídeo, áudio e entrada. Fazê-la funcionar sobre a Mesa é o primeiro passo para rodar programas maiores neste sistema.
 
@@ -345,10 +345,74 @@ sudo cp bin/start_sdl /media/usuario/main/bin/start
 
 O programa imprime o driver de vídeo, que deve ser `KMSDRM`, a resolução da tela e o renderer, que deve ser `opengles2`. O renderer `software` indica que a SDL2 não conseguiu usar a GPU.
 
+Em seguida, o programa imprime o driver de áudio, que deve ser `alsa`, e o formato aberto. O áudio é opcional: se a SDL2 não encontrar uma placa de som, o programa imprime o erro e continua só com o vídeo.
+
 ### Observações de execução
 
 - A SDL2 procura em `/dev/dri` o primeiro `card*` com um conector conectado e ignora o node do `lima`, que não tem conectores. Para forçar um node, defina `SDL_KMSDRM_DEVICE_INDEX` com o número do `card`.
 - O programa usa um laço de quadros com vsync, como um jogo: trata os eventos, desenha e apresenta o quadro. A SDL2 converte `SIGINT` e `SIGTERM` no evento `SDL_QUIT`, que encerra o laço.
 - Ao encerrar, `SDL_Quit` libera o DRM master e restaura o modo anterior da tela, que volta a mostrar o console do kernel.
 - Sem a `libudev`, a SDL2 não procura teclados e mouses em `/dev/input`. Se a entrada não funcionar, confirme que o `init` imprimiu `udev iniciado` no boot. O kernel em `boot/zImage` já inclui o `evdev` e os drivers `usbhid` e `hid-generic`, usados por teclados e mouses USB.
-- A `alsa-lib` dá à SDL2 o driver de áudio, mas ainda não há som na placa: no device tree em `boot/dtb/`, o codec analógico, as interfaces I2S (incluindo a do áudio HDMI) e o S/PDIF estão desabilitados. Sem uma placa de som em `/dev/snd`, a SDL2 não consegue abrir nenhum dispositivo de áudio.
+- A `alsa-lib` dá à SDL2 o driver de áudio, mas a placa só tem som depois das alterações da seção [Áudio pelo HDMI](#áudio-pelo-hdmi). Sem uma placa de som em `/dev/snd`, a SDL2 não consegue abrir nenhum dispositivo de áudio.
+
+## Áudio pelo HDMI
+
+O H3 envia o áudio ao HDMI por uma interface I2S interna, a I2S2. O controlador HDMI da Synopsys (`dw-hdmi`) recebe essas amostras e as transmite junto com o vídeo. No Linux, três drivers participam:
+
+| Driver | Função |
+|---|---|
+| `sun4i-i2s` | Interface I2S2, que lê as amostras da memória por DMA |
+| `dw-hdmi-i2s-audio` e `hdmi-audio-codec` | Lado do HDMI, que recebe o I2S e configura o envio do áudio ao monitor |
+| `simple-audio-card` | Placa de som que liga as duas pontas e aparece em `/dev/snd` |
+
+### Device tree
+
+No device tree em `boot/dtb/`, a I2S2 está desabilitada, o nó do HDMI não declara uma interface de áudio e não existe nenhuma placa de som. Em vez de alterar o arquivo `.dtb`, o `boot/boot.cmd` corrige o device tree no U-Boot antes de iniciar o kernel, como já faz com a GPU:
+
+1. Habilita a I2S2 (`/soc/i2s@1c22800`).
+2. Adiciona `#sound-dai-cells` ao nó do HDMI, para que ele possa ser referenciado como interface de áudio.
+3. Cria o nó `/hdmi-sound`, uma `simple-audio-card` que liga a I2S2 ao HDMI. O codec do HDMI exige o sinal de quadro (LRCK) invertido e slots fixos de 32 bits, configurados por `simple-audio-card,frame-inversion` e pelas propriedades de TDM. A propriedade `playback-only` limita a placa à reprodução: a I2S2 só tem DMA de envio, e sem essa propriedade a placa também tentaria criar o fluxo de captura, falhando com `Missing dma channel for stream: 1`.
+
+Os nós do HDMI e da I2S2 não têm `phandle` no device tree original, pois nenhum outro nó os referencia. O script reaproveita o `phandle` se ele existir e, caso contrário, atribui os valores livres `0x1000` e `0x1001`. A configuração segue a [proposta de áudio HDMI para H3/H5](https://www.mail-archive.com/linux-kernel@vger.kernel.org/msg2322809.html) enviada ao kernel, que não chegou a ser incorporada.
+
+Depois de alterar o `boot/boot.cmd`, gere novamente o `boot/boot.scr`, que é a versão lida pelo U-Boot, e copie-o para o cartão SD:
+
+```sh
+mkimage -C none -A arm -T script -d boot/boot.cmd boot/boot.scr
+```
+
+O `mkimage` faz parte do pacote `u-boot-tools`.
+
+### Kernel
+
+O kernel em `boot/zImage` já inclui todos os drivers do áudio HDMI. Se usar esse kernel, recompilar é opcional: copie-o para o cartão SD e siga para [Conferindo o resultado](#conferindo-o-resultado-1).
+
+Se preferir compilar o seu próprio kernel no projeto anterior, saiba que o `sunxi_defconfig` já inclui o `sun4i-i2s`, o `dw-hdmi-i2s-audio` e o `hdmi-audio-codec`, mas não inclui a `simple-audio-card`. Sem ela, a I2S2 e o HDMI são detectados, mas nenhuma placa de som é criada.
+
+Na pasta do código-fonte do kernel, depois de gerar a configuração com o `sunxi_defconfig` e antes de compilar, execute:
+
+```sh
+./scripts/config --enable DRM_FBDEV_EMULATION \
+                 --enable FB_DEVICE \
+                 --enable FRAMEBUFFER_CONSOLE \
+                 --enable DRM_CLIENT_DEFAULT_FBDEV \
+                 --enable SND_SIMPLE_CARD \
+                 --enable SND_SUN4I_I2S \
+                 --enable DRM_DW_HDMI_I2S_AUDIO
+```
+
+As quatro primeiras opções são as do console do projeto anterior. As três últimas são as do áudio HDMI. O `--enable` grava cada opção como `=y`, ou seja, compilada dentro do kernel, e não como módulo, pois o sistema não carrega módulos. Diferente do `make menuconfig`, o comando produz sempre a mesma configuração e pode ser repetido sem navegar pelos menus.
+
+O `scripts/config` não confere dependências. Se faltar alguma, o `make` remove a opção do `.config` sem avisar. Depois de iniciar a compilação, confirme que as linhas abaixo terminam em `=y`:
+
+```sh
+grep -E 'CONFIG_(SND_SIMPLE_CARD|SND_SIMPLE_CARD_UTILS|SND_SUN4I_I2S|DRM_DW_HDMI_I2S_AUDIO|SND_SOC_HDMI_CODEC|DRM_DW_HDMI)=' .config
+```
+
+A `SND_SIMPLE_CARD_UTILS` e a `SND_SOC_HDMI_CODEC` não aparecem no comando, pois são habilitadas automaticamente pela `simple-audio-card` e pelo `dw-hdmi-i2s-audio`. Ao final, copie o novo `zImage` para `boot/zImage` e para o cartão SD.
+
+### Conferindo o resultado
+
+No boot, a placa de som deve aparecer no log do kernel e em `/proc/asound/cards`, com o nome `sun8i-h3-hdmi`, e os dispositivos devem existir em `/dev/snd` (`controlC0` e `pcmC0D0p`). Ao executar o `start_sdl`, o programa deve imprimir `Driver de audio: alsa` e tocar um tom de 440 Hz no monitor ou na TV enquanto a tela estiver vermelha ou verde.
+
+O áudio só é enviado enquanto o HDMI está ativo, ou seja, enquanto um programa mantém um modo de vídeo na tela, e o monitor ou TV precisa aceitar áudio pelo HDMI. Monitores sem alto-falantes aceitam o sinal, mas ficam em silêncio.
