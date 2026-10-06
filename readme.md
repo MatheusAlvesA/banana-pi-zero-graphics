@@ -349,6 +349,14 @@ O `udevd` precisa estar rodando antes de o programa abrir a SDL2. O `sbin/init.c
 
 Se `/sbin/udevd` não existir no cartão, o `init` segue sem udev.
 
+### Teclado e console
+
+Enquanto o programa está aberto, a SDL2 lê o teclado diretamente pelo `evdev`. O kernel, porém, continua entregando as mesmas teclas ao console (`tty1`), que as mostra na tela. Elas ficam escondidas atrás da imagem do programa e aparecem quando ele fecha. Para evitar isso, a SDL2 desliga o teclado do console (modo `K_OFF`) enquanto está aberta e o religa ao sair. Para isso, ela abre o `/dev/tty`, que só existe para processos com terminal de controle.
+
+O `init` não tem terminal de controle, e seus filhos também não teriam. Por isso, antes de executar `/bin/start`, a função `attach_console_tty` do `sbin/init.c` cria uma sessão nova (`setsid`), abre o VT em primeiro plano, lido de `/sys/class/tty/tty0/active`, e o define como terminal de controle (`TIOCSCTTY`). O `/dev/console` e o `/dev/tty0` não servem para isso, pois o kernel nunca os aceita como terminal de controle. A saída do programa continua aparecendo no mesmo console.
+
+Como o programa agora tem um terminal de controle, `Ctrl+C` no teclado da placa encerra o `/bin/start` quando o teclado do console está ligado, por exemplo no `start` com DRM/KMS, que não usa a SDL2. Com a SDL2 aberta, o teclado do console fica desligado, e o `Ctrl+C` chega apenas ao programa, como uma tecla comum.
+
 O `init` é estático e não depende das bibliotecas do cartão. Para compilá-lo, use o compilador cruzado do projeto anterior, na raiz deste repositório:
 
 ```sh

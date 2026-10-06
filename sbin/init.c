@@ -297,6 +297,41 @@ static void start_udev(void)
     puts("udev iniciado");
 }
 
+static void attach_console_tty(void)
+{
+    char path[32] = "/dev/";
+    FILE *file = fopen("/sys/class/tty/tty0/active", "r");
+    int fd;
+
+    /* O VT em primeiro plano, normalmente tty1. O /dev/console e o /dev/tty0
+     * nunca viram terminal de controle, por isso abrimos o VT diretamente. */
+    if (file == NULL || fscanf(file, "%26s", path + 5) != 1)
+        strcpy(path, "/dev/tty1");
+    if (file != NULL)
+        fclose(file);
+
+    /* Sem terminal de controle, o /dev/tty nao abre, e a SDL nao consegue
+     * desligar o teclado do console (KDSKBMODE K_OFF). As teclas apertadas
+     * no programa apareceriam no console. Em uma sessao nova, o primeiro
+     * terminal aberto sem O_NOCTTY vira o terminal de controle. */
+    if (setsid() == -1) {
+        perror("setsid");
+        return;
+    }
+    fd = open(path, O_RDWR);
+    if (fd == -1) {
+        perror(path);
+        return;
+    }
+    if (ioctl(fd, TIOCSCTTY, 0) == -1)
+        perror("TIOCSCTTY");
+    dup2(fd, STDIN_FILENO);
+    dup2(fd, STDOUT_FILENO);
+    dup2(fd, STDERR_FILENO);
+    if (fd > STDERR_FILENO)
+        close(fd);
+}
+
 static pid_t start_program(void)
 {
     if (access("/bin/start", F_OK) == -1) {
@@ -307,6 +342,7 @@ static pid_t start_program(void)
     if (pid == -1) {
         perror("fork /bin/start");
     } else if (pid == 0) {
+        attach_console_tty();
         puts("Binario /bin/start encontrado, iniciando...");
         execl("/bin/start", "/bin/start", (char *)NULL);
         perror("exec /bin/start");
