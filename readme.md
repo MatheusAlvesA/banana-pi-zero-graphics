@@ -4,10 +4,11 @@ O objetivo deste repositório é servir como uma segunda etapa do projeto [Banan
 
 Neste projeto, vamos substituir o programa `start.c` da etapa anterior por uma nova versão, capaz de mostrar gráficos simples na tela e vinculada dinamicamente às bibliotecas necessárias.
 
-O repositório traz duas versões desse programa:
+O repositório traz três versões desse programa:
 
 - `bin/start.c`: desenha diretamente com DRM/KMS, usando apenas `libc` e `libdrm`.
 - `bin/start_gl.c`: desenha com a GPU usando OpenGL ES 2.0 por meio da [Mesa3D](https://mesa3d.org/). Veja a seção [Versão com OpenGL ES (Mesa3D)](#versão-com-opengl-es-mesa3d).
+- `bin/start_sdl.c`: desenha com a GPU por meio da [SDL2](https://www.libsdl.org/), que cuida do DRM/KMS, da GBM e do EGL. Veja a seção [Versão com SDL2](#versão-com-sdl2).
 
 Apenas uma delas é usada por vez, sempre instalada no cartão SD como `/bin/start`.
 
@@ -233,4 +234,121 @@ sudo cp bin/start_gl /media/usuario/main/bin/start
 
 - O kernel inicia o `init` com `HOME=/`, e a Mesa grava o cache de shaders em `/.cache`, no cartão SD. Para desativar o cache, defina `MESA_SHADER_CACHE_DISABLE=true` no ambiente do programa.
 - Para diagnosticar falhas na inicialização do EGL ou no carregamento dos drivers, defina `EGL_LOG_LEVEL=debug`.
-- O sistema não tem udev. A Mesa e a `libdrm` encontram os dispositivos por `/dev` e `/sys`, que o `init` já monta.
+- A Mesa e a `libdrm` não dependem do udev: elas encontram os dispositivos por `/dev` e `/sys`, que o `init` já monta.
+
+## Versão com SDL2
+
+O arquivo `bin/start_sdl.c` faz o mesmo que o `bin/start_gl.c`: pinta a tela de vermelho com a GPU por 10 segundos. Além disso, se a barra de espaço for pressionada num teclado conectado, a tela fica verde, o que serve para testar a entrada pelo udev. A diferença é que a [SDL2](https://www.libsdl.org/) assume as etapas que o `start_gl.c` faz manualmente: procurar o dispositivo DRM, assumir o controle como DRM master, criar a GBM e o EGL, e exibir cada quadro na tela.
+
+A SDL2 é a camada usada por muitos jogos e engines para acessar vídeo, áudio e entrada. Fazê-la funcionar sobre a Mesa é o primeiro passo para rodar programas maiores neste sistema.
+
+### Configuração do Buildroot
+
+Parta da configuração da seção [Configuração do Buildroot](#configuração-do-buildroot) da Mesa, pois a SDL2 usa a GBM, o EGL e o OpenGL ES gerados por ela. Execute `make menuconfig` na pasta do Buildroot e habilite:
+
+**System configuration**
+
+- Em *`/dev` management*, escolha `Dynamic using devtmpfs + eudev` (`BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_EUDEV`). Essa opção seleciona o pacote `eudev`, que fornece o daemon `udevd`, a ferramenta `udevadm` e a biblioteca `libudev`. Mantenha os padrões do pacote.
+
+**Target packages → Libraries → Audio/Sound**
+
+- Habilite `alsa-lib` (`BR2_PACKAGE_ALSA_LIB`), a biblioteca do ALSA, a interface de áudio do kernel Linux.
+
+**Target packages → Graphic libraries and applications (graphic/text)**
+
+- Em *Graphic libraries*, habilite `sdl2` (`BR2_PACKAGE_SDL2`) e, dentro dele:
+  - `OpenGL ES` (`BR2_PACKAGE_SDL2_OPENGLES`)
+  - `KMS/DRM video driver` (`BR2_PACKAGE_SDL2_KMSDRM`)
+
+A opção `KMS/DRM video driver` só aparece depois de habilitar `OpenGL ES`. Não habilite os drivers X11 ou Wayland: sem eles, o KMS/DRM é o único driver de vídeo da SDL2.
+
+Com a `libudev`, a SDL2 encontra teclados, mouses e controles em `/dev/input`. Com a `alsa-lib`, ela ganha o driver de áudio `alsa`. A SDL2 só usa essas bibliotecas se elas existirem quando ela for compilada, por isso habilite as três opções antes de executar o `make`.
+
+Salve a configuração e compile:
+
+```sh
+make
+```
+
+Como a toolchain e a Mesa já estão prontas, apenas a SDL2, o udev e o ALSA são compilados. A biblioteca gerada é `output/target/usr/lib/libSDL2-2.0.so.0`, e os cabeçalhos ficam em `output/staging/usr/include/SDL2/`.
+
+### Cópia para o cartão SD
+
+A `libSDL2` depende diretamente apenas da `libc` e da `libm`. A `libdrm`, a `libgbm`, a `libEGL`, a `libGLESv2`, a `libudev` e a `libasound` são carregadas em tempo de execução por `dlopen`. Por isso, copie novamente as pastas de bibliotecas inteiras, como na seção da Mesa. A pasta `lib/` inclui a `libudev`, a `libblkid` e, em `lib/udev/`, as regras e o banco de dados de hardware (`hwdb.bin`) do udev:
+
+```sh
+sudo cp -a output/target/lib/.     /media/usuario/main/lib/
+sudo cp -a output/target/usr/lib/. /media/usuario/main/usr/lib/
+```
+
+Copie também os programas do udev, sua configuração e os arquivos de configuração do ALSA, que a `alsa-lib` lê de `/usr/share/alsa`:
+
+```sh
+sudo mkdir -p /media/usuario/main/sbin /media/usuario/main/usr/bin \
+    /media/usuario/main/etc/udev /media/usuario/main/usr/share
+sudo cp -a output/target/sbin/udevd        /media/usuario/main/sbin/
+sudo cp -a output/target/usr/bin/udevadm   /media/usuario/main/usr/bin/
+sudo cp -a output/target/etc/udev/udev.conf /media/usuario/main/etc/udev/
+sudo cp -a output/target/usr/share/alsa    /media/usuario/main/usr/share/
+```
+
+Não copie a pasta `output/target/sbin/` inteira: o `sbin/init` do Buildroot é um link para o BusyBox e substituiria o `init` deste projeto. O `/sbin/udevadm` do Buildroot também é dispensável, pois é só um link para `/usr/bin/udevadm`.
+
+### Inicialização do udev
+
+O `udevd` precisa estar rodando antes de o programa abrir a SDL2. O `sbin/init.c` deste projeto faz isso na função `start_udev`, antes de executar `/bin/start`, nas mesmas etapas do script `S10udevd` que o Buildroot instalaria para o init do BusyBox:
+
+1. Monta um `tmpfs` em `/run`, onde o udev guarda seu banco de dados (`/run/udev`). Assim, o banco é recriado a cada boot.
+2. Executa `/sbin/udevd --daemon`, que só retorna depois de começar a escutar os eventos do kernel.
+3. Executa `udevadm trigger` para subsistemas e para dispositivos. Os dispositivos detectados durante o boot geraram eventos antes de o `udevd` existir, e o `trigger` pede ao kernel para reenviá-los.
+4. Executa `udevadm settle`, que espera o `udevd` processar todos os eventos, com limite de 30 segundos.
+
+Se `/sbin/udevd` não existir no cartão, o `init` segue sem udev.
+
+O `init` é estático e não depende das bibliotecas do cartão. Para compilá-lo, use o compilador cruzado do projeto anterior, na raiz deste repositório:
+
+```sh
+arm-linux-gnueabihf-gcc \
+    -Wall -Wextra -O2 -mcpu=cortex-a7 -static -s \
+    sbin/init.c \
+    -o sbin/init
+```
+
+Copie `sbin/init` para `/sbin/init` no cartão SD:
+
+```sh
+sudo cp sbin/init /media/usuario/main/sbin/init
+```
+
+### Compilação de `start_sdl.c`
+
+Assim como o `start_gl.c`, o `start_sdl.c` precisa da toolchain do Buildroot. Execute na raiz deste repositório:
+
+```sh
+BUILDROOT_DIR="$PWD/buildroot"
+BUILDROOT_CC="$BUILDROOT_DIR/output/host/bin/arm-buildroot-linux-gnueabihf-gcc"
+BUILDROOT_SYSROOT="$BUILDROOT_DIR/output/staging"
+
+"$BUILDROOT_CC" \
+    --sysroot="$BUILDROOT_SYSROOT" \
+    -Wall -Wextra -O2 -mcpu=cortex-a7 \
+    bin/start_sdl.c \
+    -lSDL2 \
+    -o bin/start_sdl
+```
+
+Copie `bin/start_sdl` para `/bin/start` no cartão SD:
+
+```sh
+sudo cp bin/start_sdl /media/usuario/main/bin/start
+```
+
+O programa imprime o driver de vídeo, que deve ser `KMSDRM`, a resolução da tela e o renderer, que deve ser `opengles2`. O renderer `software` indica que a SDL2 não conseguiu usar a GPU.
+
+### Observações de execução
+
+- A SDL2 procura em `/dev/dri` o primeiro `card*` com um conector conectado e ignora o node do `lima`, que não tem conectores. Para forçar um node, defina `SDL_KMSDRM_DEVICE_INDEX` com o número do `card`.
+- O programa usa um laço de quadros com vsync, como um jogo: trata os eventos, desenha e apresenta o quadro. A SDL2 converte `SIGINT` e `SIGTERM` no evento `SDL_QUIT`, que encerra o laço.
+- Ao encerrar, `SDL_Quit` libera o DRM master e restaura o modo anterior da tela, que volta a mostrar o console do kernel.
+- Sem a `libudev`, a SDL2 não procura teclados e mouses em `/dev/input`. Se a entrada não funcionar, confirme que o `init` imprimiu `udev iniciado` no boot. O kernel em `boot/zImage` já inclui o `evdev` e os drivers `usbhid` e `hid-generic`, usados por teclados e mouses USB.
+- A `alsa-lib` dá à SDL2 o driver de áudio, mas ainda não há som na placa: no device tree em `boot/dtb/`, o codec analógico, as interfaces I2S (incluindo a do áudio HDMI) e o S/PDIF estão desabilitados. Sem uma placa de som em `/dev/snd`, a SDL2 não consegue abrir nenhum dispositivo de áudio.

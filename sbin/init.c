@@ -36,6 +36,9 @@ static void init_base_virtual_fs(void)
     mount_virtual_fs("/sys", "sysfs", 0755);
     mount_virtual_fs("/dev", "devtmpfs", 0755);
     mount_virtual_fs("/tmp", "tmpfs", 01777);
+    /* O udev guarda seu banco de dados em /run/udev, que nao pode sobreviver
+     * a reinicializacoes. */
+    mount_virtual_fs("/run", "tmpfs", 0755);
 }
 
 static void config_fb_screen(void)
@@ -240,6 +243,60 @@ done:
     close(fd);
 }
 
+static int run_and_wait(char *const argv[])
+{
+    int status;
+    pid_t pid = fork();
+
+    if (pid == -1) {
+        perror("fork");
+        return -1;
+    }
+    if (pid == 0) {
+        execv(argv[0], argv);
+        perror(argv[0]);
+        _exit(127);
+    }
+    while (waitpid(pid, &status, 0) == -1) {
+        if (errno != EINTR) {
+            perror("waitpid");
+            return -1;
+        }
+    }
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        fprintf(stderr, "%s falhou\n", argv[0]);
+        return -1;
+    }
+    return 0;
+}
+
+static void start_udev(void)
+{
+    char *const udevd[] = {"/sbin/udevd", "--daemon", NULL};
+    char *const subsystems[] = {"/usr/bin/udevadm", "trigger",
+                                "--type=subsystems", "--action=add", NULL};
+    char *const devices[] = {"/usr/bin/udevadm", "trigger",
+                             "--type=devices", "--action=add", NULL};
+    char *const settle[] = {"/usr/bin/udevadm", "settle", "--timeout=30", NULL};
+
+    if (access(udevd[0], X_OK) == -1) {
+        puts("udevd nao encontrado, seguindo sem udev");
+        return;
+    }
+    /* Com --daemon, o udevd so retorna depois de abrir o socket de eventos do
+     * kernel, entao nenhum evento disparado a seguir se perde. O processo que
+     * fica em segundo plano passa a ser filho do init. */
+    if (run_and_wait(udevd) == -1)
+        return;
+    /* Os dispositivos detectados durante o boot geraram eventos antes de o
+     * udevd existir. O trigger pede ao kernel para reenvia-los, e o settle
+     * espera o udevd processar todos, como o S10udevd do Buildroot faz. */
+    if (run_and_wait(subsystems) == -1 || run_and_wait(devices) == -1)
+        return;
+    run_and_wait(settle);
+    puts("udev iniciado");
+}
+
 static pid_t start_program(void)
 {
     if (access("/bin/start", F_OK) == -1) {
@@ -268,6 +325,7 @@ int main(void)
     print_hardware_info();
     print_random_number();
     draw_purple_rectangle();
+    start_udev();
     pid_t start_pid = start_program();
 
     for (;;) {
