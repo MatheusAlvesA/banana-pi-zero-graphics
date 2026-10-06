@@ -167,7 +167,7 @@ No editor, abra o projeto e ajuste em **Project → Project Settings**:
 
 Nas imagens, selecione cada arquivo no painel *FileSystem* e, na aba **Import**, confira se **Compress → Mode** está em `Lossless`. Esse é o padrão para imagens 2D. A compressão de vídeo padrão do desktop (S3TC) não é suportada pela Mali-400.
 
-O Godot grava os dados do jogo, como saves e configurações (`user://`), em `$HOME/.local/share/godot/app_userdata/<nome do projeto>/`. Como o kernel inicia o `init` com `HOME=/`, esses arquivos ficam em `/.local/share/` no cartão SD e continuam lá quando o jogo é atualizado.
+O Godot grava os dados do jogo, como saves e configurações (`user://`), em `$HOME/.local/share/godot/app_userdata/<nome do projeto>/`. Como o `init` executa o `/bin/start` com `HOME=/home/jorge`, esses arquivos ficam em `/home/jorge/.local/share/` no cartão SD e continuam lá quando o jogo é atualizado.
 
 ## 4. Exportar o jogo
 

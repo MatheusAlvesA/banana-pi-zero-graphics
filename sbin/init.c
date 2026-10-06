@@ -4,6 +4,7 @@
 #include <linux/vt.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
@@ -332,6 +333,86 @@ static void attach_console_tty(void)
         close(fd);
 }
 
+#define USER_NAME "jorge"
+#define USER_ID 1000
+#define USER_HOME "/home/" USER_NAME
+
+/* Procura uma linha que comece por "name:", como em /etc/passwd e
+ * /etc/group. */
+static int has_entry(const char *path, const char *name)
+{
+    FILE *file = fopen(path, "r");
+    char line[512];
+    size_t length = strlen(name);
+    int found = 0;
+
+    if (file == NULL)
+        return 0;
+    while (!found && fgets(line, sizeof(line), file) != NULL)
+        found = strncmp(line, name, length) == 0 && line[length] == ':';
+    fclose(file);
+    return found;
+}
+
+static void add_entry(const char *path, const char *name, const char *entry)
+{
+    FILE *file;
+    long size;
+
+    if (has_entry(path, name))
+        return;
+    file = fopen(path, "a+");
+    if (file == NULL) {
+        perror(path);
+        return;
+    }
+    /* Se a ultima linha do arquivo nao terminar em \n, a nova entrada seria
+     * colada nela. */
+    fseek(file, 0, SEEK_END);
+    size = ftell(file);
+    if (size > 0) {
+        fseek(file, -1, SEEK_END);
+        if (fgetc(file) != '\n')
+            fputc('\n', file);
+    }
+    fprintf(file, "%s\n", entry);
+    if (fclose(file) == EOF)
+        perror(path);
+    else
+        printf("%s: entrada %s criada\n", path, name);
+}
+
+static void create_user(void)
+{
+    char id[16];
+    char passwd[128];
+    char group[64];
+
+    if (mkdir("/etc", 0755) == -1 && errno != EEXIST)
+        perror("/etc");
+    if (mkdir("/home", 0755) == -1 && errno != EEXIST)
+        perror("/home");
+
+    /* A senha "*" bloqueia o login sem exigir /etc/shadow. O root tambem e
+     * registrado, pois e com ele que o /bin/start executa. */
+    snprintf(id, sizeof(id), "%d", USER_ID);
+    snprintf(passwd, sizeof(passwd), "%s:*:%s:%s:%s:%s:/bin/sh",
+             USER_NAME, id, id, USER_NAME, USER_HOME);
+    snprintf(group, sizeof(group), "%s:x:%s:", USER_NAME, id);
+    add_entry("/etc/passwd", "root", "root:*:0:0:root:/root:/bin/sh");
+    add_entry("/etc/passwd", USER_NAME, passwd);
+    add_entry("/etc/group", "root", "root:x:0:");
+    add_entry("/etc/group", USER_NAME, group);
+
+    if (mkdir(USER_HOME, 0755) == 0) {
+        if (chown(USER_HOME, USER_ID, USER_ID) == -1)
+            perror("chown " USER_HOME);
+        puts(USER_HOME " criada");
+    } else if (errno != EEXIST) {
+        perror(USER_HOME);
+    }
+}
+
 static pid_t start_program(void)
 {
     if (access("/bin/start", F_OK) == -1) {
@@ -343,6 +424,9 @@ static pid_t start_program(void)
         perror("fork /bin/start");
     } else if (pid == 0) {
         attach_console_tty();
+        /* O programa executa como root, mas guarda seus arquivos (dados do
+         * Godot, cache da Mesa) na home do usuario. */
+        setenv("HOME", USER_HOME, 1);
         puts("Binario /bin/start encontrado, iniciando...");
         execl("/bin/start", "/bin/start", (char *)NULL);
         perror("exec /bin/start");
@@ -361,6 +445,7 @@ int main(void)
     print_hardware_info();
     print_random_number();
     draw_purple_rectangle();
+    create_user();
     start_udev();
     pid_t start_pid = start_program();
 

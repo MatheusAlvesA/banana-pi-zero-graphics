@@ -276,7 +276,7 @@ sudo cp bin/start_gl /media/usuario/main/bin/start
 
 ### Observações de execução
 
-- O kernel inicia o `init` com `HOME=/`, e a Mesa grava o cache de shaders em `/.cache`, no cartão SD. Para desativar o cache, defina `MESA_SHADER_CACHE_DISABLE=true` no ambiente do programa.
+- O `init` executa o `/bin/start` com `HOME=/home/jorge` (veja [Usuário e home](#usuário-e-home)), e a Mesa grava o cache de shaders em `/home/jorge/.cache`, no cartão SD. Para desativar o cache, defina `MESA_SHADER_CACHE_DISABLE=true` no ambiente do programa.
 - Para diagnosticar falhas na inicialização do EGL ou no carregamento dos drivers, defina `EGL_LOG_LEVEL=debug`.
 - A Mesa e a `libdrm` não dependem do udev: elas encontram os dispositivos por `/dev` e `/sys`, que o `init` já monta.
 
@@ -348,6 +348,16 @@ O `udevd` precisa estar rodando antes de o programa abrir a SDL2. O `sbin/init.c
 4. Executa `udevadm settle`, que espera o `udevd` processar todos os eventos, com limite de 30 segundos.
 
 Se `/sbin/udevd` não existir no cartão, o `init` segue sem udev.
+
+### Usuário e home
+
+O sistema não tem `/etc/passwd` nem `/etc/group`, e o kernel inicia o `init` com `HOME=/`. Antes de iniciar o udev, a função `create_user` do `sbin/init.c` cria o usuário `jorge`, com UID e GID 1000, e sua pasta pessoal, `/home/jorge`. Cada item só é criado se ainda não existir, então os arquivos não são alterados nos boots seguintes:
+
+- Em `/etc/passwd`, as entradas `root` e `jorge`. A senha `*` bloqueia o login sem exigir `/etc/shadow`.
+- Em `/etc/group`, os grupos `root` e `jorge`.
+- A pasta `/home/jorge`, de propriedade do `jorge`.
+
+O `/bin/start` continua executando como root, mas com `HOME=/home/jorge`. Assim, os arquivos que o programa grava na pasta pessoal, como o cache de shaders da Mesa e os saves do Godot, ficam em `/home/jorge`. Como são criados pelo root, esses arquivos pertencem ao root.
 
 ### Teclado e console
 
