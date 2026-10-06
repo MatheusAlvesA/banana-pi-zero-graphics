@@ -12,6 +12,8 @@ O repositório traz três versões desse programa:
 
 Apenas uma delas é usada por vez, sempre instalada no cartão SD como `/bin/start`.
 
+Sobre a mesma base da versão com SDL2, também é possível rodar jogos feitos com a [Godot Engine](https://godotengine.org/) na Banana Pi M2 Zero. O guia [Godot na Banana Pi M2 Zero](godot.md) mostra como compilar o modelo de exportação para a placa, exportar o jogo e obter 60 FPS, inclusive em 1080p.
+
 ## Dependências
 
 O programa `start` depende das bibliotecas compartilhadas `libc` e `libdrm`, que precisam estar disponíveis no cartão SD do Banana Pi. Como o sistema do projeto anterior foi construído do zero, também é necessário incluir o carregador dinâmico `ld-linux-armhf.so.3`.
