@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/klog.h>
 #include <sys/mman.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
@@ -14,6 +15,20 @@
 #include <sys/utsname.h>
 #include <sys/wait.h>
 #include <unistd.h>
+
+/* Valor de SYSLOG_ACTION_CONSOLE_LEVEL, nao exportado pelos headers da libc. */
+#define KLOG_CONSOLE_LEVEL 8
+
+static void clear_console(void)
+{
+    /* Nivel 1: apenas KERN_EMERG (ex.: panic) continua aparecendo no console.
+     * As mensagens seguem no buffer do kernel e podem ser lidas com dmesg. */
+    if (klogctl(KLOG_CONSOLE_LEVEL, NULL, 1) == -1)
+        perror("klogctl");
+
+    /* Cursor para o inicio, limpa a tela e o historico de rolagem. */
+    fputs("\033[H\033[2J\033[3J", stdout);
+}
 
 static void mount_virtual_fs(const char *path, const char *type, mode_t mode)
 {
@@ -172,6 +187,69 @@ static void print_random_number(void)
     fclose(file);
 }
 
+/* Com CONFIG_FRAMEBUFFER_CONSOLE_DEFERRED_TAKEOVER, o fbcon so assume o
+ * framebuffer depois do primeiro texto escrito no console, e faz isso de forma
+ * assincrona (workqueue do kernel). Ao assumir, ele configura o modo de video e
+ * limpa a tela, apagando qualquer coisa desenhada antes. Espera o fbcon estar
+ * ligado ao console antes de desenhar. */
+static void wait_fbcon(void)
+{
+    for (int tries = 0; tries < 30; tries++) {
+        for (int i = 0; i < 8; i++) {
+            char path[64], name[128];
+            long bound;
+            FILE *file;
+            int is_fbcon;
+
+            snprintf(path, sizeof(path), "/sys/class/vtconsole/vtcon%d/name", i);
+            file = fopen(path, "r");
+            if (file == NULL)
+                continue;
+            is_fbcon = fgets(name, sizeof(name), file) != NULL &&
+                       strstr(name, "frame buffer") != NULL;
+            fclose(file);
+            if (!is_fbcon)
+                continue;
+
+            /* Ler "bind" bloqueia ate o kernel terminar a troca de console. */
+            snprintf(path, sizeof(path), "/sys/class/vtconsole/vtcon%d/bind", i);
+            if (read_number(path, &bound) && bound == 1)
+                return;
+        }
+        usleep(100000);
+    }
+    fputs("fbcon nao assumiu o framebuffer em 3 s, desenhando assim mesmo\n",
+          stderr);
+}
+
+/* Abre o framebuffer onde o fbcon mostra o VT ativo. O fb0 nem sempre e a tela
+ * real: drivers virtuais (ex.: vkms) podem registrar um framebuffer antes da
+ * GPU. Sem fbcon, usa /dev/fb0. */
+static int open_console_fb(char *path, size_t size)
+{
+    struct fb_con2fbmap map = {0};
+    struct vt_stat vt;
+    int fd = open("/dev/fb0", O_RDWR | O_CLOEXEC);
+    int tty;
+
+    snprintf(path, size, "/dev/fb0");
+    if (fd == -1)
+        return -1;
+
+    tty = open("/dev/tty0", O_RDONLY | O_NOCTTY | O_CLOEXEC);
+    if (tty == -1)
+        return fd;
+    map.console = ioctl(tty, VT_GETSTATE, &vt) == 0 ? vt.v_active : 1;
+    close(tty);
+
+    if (ioctl(fd, FBIOGET_CON2FBMAP, &map) == 0 && map.framebuffer != 0) {
+        snprintf(path, size, "/dev/fb%u", map.framebuffer);
+        close(fd);
+        fd = open(path, O_RDWR | O_CLOEXEC);
+    }
+    return fd;
+}
+
 static void draw_purple_rectangle(void)
 {
     struct fb_var_screeninfo screen;
@@ -179,20 +257,22 @@ static void draw_purple_rectangle(void)
     uint32_t pixel = 0;
     unsigned int bytes, x, y;
     unsigned char *buffer;
-    int fd = open("/dev/fb0", O_RDWR);
+    char path[32];
+    int fd = open_console_fb(path, sizeof(path));
 
     if (fd == -1) {
-        perror("/dev/fb0");
+        perror(path);
         return;
     }
     if (ioctl(fd, FBIOGET_VSCREENINFO, &screen) == -1 ||
         ioctl(fd, FBIOGET_FSCREENINFO, &fixed) == -1) {
-        perror("Informacoes de /dev/fb0");
+        perror(path);
         goto done;
     }
-    printf("Tela: %ux%u, %u bits por pixel\n"
+    printf("Framebuffer: %s (%.16s)\n"
+           "Tela: %ux%u, %u bits por pixel\n"
            "Resolucao virtual: %ux%u, deslocamento: %u,%u, linha: %u bytes\n",
-           screen.xres, screen.yres, screen.bits_per_pixel,
+           path, fixed.id, screen.xres, screen.yres, screen.bits_per_pixel,
            screen.xres_virtual, screen.yres_virtual,
            screen.xoffset, screen.yoffset, fixed.line_length);
 
@@ -229,7 +309,7 @@ static void draw_purple_rectangle(void)
     }
     buffer = mmap(NULL, fixed.smem_len, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (buffer == MAP_FAILED) {
-        perror("mmap /dev/fb0");
+        perror("mmap");
         goto done;
     }
     /* Banana Pi usa little-endian; respeite o stride e os offsets virtuais. */
@@ -435,15 +515,18 @@ static pid_t start_program(void)
     return pid;
 }
 
+
 int main(void)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
+    clear_console();
     puts("Seu Banana Pi completou o boot do Kernel Linux!");
 
     init_base_virtual_fs();
     config_fb_screen();
     print_hardware_info();
     print_random_number();
+    wait_fbcon();
     draw_purple_rectangle();
     create_user();
     start_udev();
